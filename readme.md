@@ -2,7 +2,7 @@
 
 This is a Super Hexagon clone game written in rust and webgpu. It uses a custom 3D graphics engine based on ray marching instead of a traditional pipeline. It is currently in an early development stage where key features are mostly done, but no real game content is in place yet.
 
-![Screenshot](web/screenshot.png "Screenshot")
+<img src="web/screenshot.png" alt="Screenshot" width="400"/>
 
 Ray marching is a rendering technique that renders each pixel by stepping along the corresponding light ray in render space. Each step, the minimal distance to the scene is computed, then the ray origin is moved by this distance, this is repeated until sufficient distance to the scene is reached. This approach is generally less performant than traditional pipelines, but it makes certain graphics effects very easy to implement, for example reflection, refraction and water effects. There are ample examples of raymarching graphics on [shadertoy.com](https://www.shadertoy.com).
 
