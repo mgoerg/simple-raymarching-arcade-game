@@ -21,6 +21,10 @@ var<storage, read> g_obstacle_globals: ObstacleGlobal;
 @group(1) @binding(2)
 var<storage, read> g_obstacles: array<Obstacle, 24>;
 
+@group(2) @binding(0)
+var t_noise2d: texture_2d<f32>;
+@group(2) @binding(1)
+var s_noise2d: sampler;
 
 
 // Vertex shader
@@ -52,15 +56,12 @@ fn normal(p: vec3f) -> vec3f {
     ));
 }
 
-fn shade(color: vec3f, position: vec3f, light_dir: vec3f, view_dir: vec3f, normal: vec3f) -> vec3f {
-    // position: The position of the point being shaded
+fn shade_directional_light_intensity(intensity: f32, light_dir: vec3f, view_dir: vec3f, normal: vec3f) -> f32 {
     // light_dir: The direction from the point to the light source
-    // view_dir: The direction from the point to the viewer (camera)
     // normal: The normal vector at the point being shaded
 
-    var ambient = 0.1;
-    var diffuse = max(dot(normal, light_dir), 0.0) * 0.7;
-    return color * (ambient + diffuse);
+    var diffuse = max(dot(normal, light_dir), 0.0) * intensity;
+    return diffuse;
 }
 
 fn modulo(a: f32, b: f32) -> f32 {
@@ -68,13 +69,35 @@ fn modulo(a: f32, b: f32) -> f32 {
 }
 
 
-fn ray_trace_simple(pos: vec3f, dir: vec3f, max_steps: i32) -> f32 {
-    var t = 0.0;
-    for (var i = 0; i < max_steps; i = i + 1) {
-        var d = map_dir(pos + t * dir, dir);
-        t = t + d;
+struct SimpleRayHit {
+    distance: f32,
+    hit: bool,
+    final_position: vec3f,
+}
+
+fn simple_ray_trace(pos: vec3f, dir: vec3f, max_steps: i32) -> SimpleRayHit {
+    var result = SimpleRayHit();
+    var p = pos;
+    var d = map_dir(p, dir);
+    if (abs(d) < 0.01) {
+        d = 0.1;
     }
-    return t;
+    var inside = d < 0.0;
+    var t = 0.0;
+    p += abs(d) * dir;
+    for (var i = 0; i < max_steps; i = i + 1) {
+        var d = map_dir(p, dir);
+        if (!inside && d < 0.01) { 
+            result.hit = true;
+            break; 
+        }
+        inside = d < 0.0;
+        p += abs(d) * dir;
+        t = t + abs(d);
+    }
+    result.distance = t;
+    result.final_position = p;
+    return result;
 }
 
 
@@ -95,63 +118,167 @@ fn calcAO(p: vec3f, n: vec3f) -> f32 {
 }
 
 
+struct Material {
+    color: vec3f,
+    roughness: f32,
+    // metallic: f32,
+    reflectivity: f32,
+    // emissive: f32,
+    _padding: f32,
+}
+
+fn material_from_id(id: i32) -> Material {
+    var material = Material();
+    // Ground
+    if (id == 0) {
+        material.color = vec3f(0.1, 0.02, 0.02);
+        material.reflectivity = 0.9;
+        // material.roughness = 0.1;
+    }
+
+    // Player
+    if (id == 1) {
+        material.color = vec3f(0.8, 0.5, 0.3);
+        material.reflectivity = 0.8;
+        // material.roughness = 0.1;
+    }
+
+    // Obstacle
+    if (id == 2) {
+        material.color = vec3f(0.7, 0.2, 0.2);
+        material.reflectivity = 0.0;
+        // material.roughness = 0.1;
+    }
+    return material;
+}
+
+fn srgb_to_rgb(srgb_color: vec3f) -> vec3f {
+    return pow((srgb_color + vec3f(0.055)) / 1.055, vec3f(2.4));
+}
+
+fn rgb_to_srgb(rgb_color: vec3f) -> vec3f {
+    return pow(rgb_color, vec3f(0.416666)) * 1.055 - 0.055;
+} 
 
 // Fragment shader
 @fragment
 fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     // setup camera
-    var aspect = g_engine.resolution_x / g_engine.resolution_y;
-    var uv = -(in.clip_position.xy / g_engine.resolution_y - vec2f(aspect * 0.5, 0.5));
+    let aspect = g_engine.resolution_x / g_engine.resolution_y;
+    let uv = -(in.clip_position.xy / g_engine.resolution_y - vec2f(aspect * 0.5, 0.5));
 
-    var camera_origin = g_camera.position.xyz;
-    var camera_direction = g_camera.direction.xyz;
+    let camera_origin = g_camera.position.xyz;
+    let camera_direction = g_camera.direction.xyz;
     var ray_direction = normalize(camera_direction*0.9 + uv.x * g_camera.u_dir.xyz + uv.y * g_camera.v_dir.xyz);
 
     // raymarch
-    var color = vec3f(0.2);
     var transmittance = 1.0;
-    var hit = false;
 
-    var max_steps = 80;
-    var max_distance = 100.0;
-    var epsilon = 0.01;
+    let max_steps = 80;
+    let max_bounces = 3;
+    let max_distance = 100.0;
+    let epsilon = 0.01;
     var t = 0.0;
     var p = camera_origin;
-    var i = 0;
-    for (i = 0; i < max_steps; i = i + 1) {
-        var d = map_dir(p, ray_direction);
-        transmittance *= exp(-0.01 * d);
+    
+    // Vary scene scale
+    // let t_frac = (2.0 * g_engine.global_time) - floor(2.0 * g_engine.global_time);
+    // let t_mod = floor(g_engine.global_time * 2.0) % 4.0;
+    // let foo = (1.0 - t_frac);
+    // var factor = 0.0;
+    // if t_mod == 0.0 {
+    //     factor = foo * 0.07;
+    // } else if t_mod == 1.0 {
+    //     factor = foo * 0.03;
+    // } else if t_mod == 2.0 {
+    //     factor = foo * 0.04;
+    // } else if t_mod == 3.0 {
+    //     factor = foo * 0.03;
+    // }
+    // p *= (1.0 - factor);
+    
+    let background_color = vec3f(0.2);
+    var color = background_color;
 
-        if (d < epsilon * (1.0 + t * 0.1)) {
-            color = vec3f(0.5, 0.4, 0.6) * transmittance;
-            hit = true;
+    var bounce = 0;
+    var step = 0;
+    var hit_infty = false;
+
+    var min_player_distance = 1e20;
+
+    for (bounce = 0; bounce < max_bounces; bounce = bounce + 1) {
+        var hit = false;
+        for (; step < max_steps; step = step + 1) {
+            // note step is not reset after a bounce
+            var d = map_dir(p, ray_direction);
+            transmittance *= exp(-0.01 * d);
+            if (transmittance < 0.01) {
+                hit_infty = true;
+                break;
+            }
+
+            if (d < epsilon * (1.0 + t * 0.1)) {
+                hit = true;
+                break;
+            }
+            t = t + abs(d);
+            if (t > max_distance) {
+                hit_infty = true;
+                break;
+            }
+
+
+            min_player_distance = min(min_player_distance, player_distance(p));
+
+            var rnd = modulo(t * 1000.0, 1.0); 
+            p += abs(d) * (0.99) * ray_direction;
+        }
+
+        if (hit) {
+            var n = normal(p);
+
+            var material_id = map_color(p);
+            var material = material_from_id(material_id);
+            var current_hit_color = material.color;
+
+            // Lighting
+            var light = normalize(vec3f(-0.4, 1.0, 0.4));
+            var view = -ray_direction;
+            var in_shade = simple_ray_trace(p, light, 20).hit;
+            var diffuse_intensity = select(shade_directional_light_intensity(0.4, light, view, n), 0.0, in_shade);
+            var ambient = 0.1;
+            var ambient_occlusion = calcAO(p, n);
+            current_hit_color = current_hit_color * (diffuse_intensity + ambient * ambient_occlusion);
+
+            // Depth Fog for low y values
+            var depth = clamp(0.0, 1.0, exp(p.y * 0.5));
+            let depth_fog_color = vec3f(0.2, 0.1, 0.0);
+            current_hit_color = mix(current_hit_color, depth_fog_color, 1.0 - depth);
+
+            // Transmittance fog
+            // transmittance = clamp(0.0, 1.0, transmittance);
+            color = mix(color, current_hit_color, transmittance);
+            
+            if (material.reflectivity > 0.0) {
+                ray_direction = reflect(ray_direction, n);
+                p += 0.1 * n;
+                transmittance *= material.reflectivity;
+            } else {
+                break;
+            }
+        } else {
+            // color = mix(color, background_color, transmittance);
+            // color = vec3f(0.0);
+            // transmittance = 0.0;
             break;
         }
-        t = t + abs(d);
-        if (t > max_distance) {
-            break;
-        }
-        var rnd = modulo(t * 1000.0, 1.0); 
-        p += abs(d) * (0.99) * ray_direction;
-        
-        //p += abs(d) * ray_direction;
     }
+    // if (hit_infty) {
+    //     color = mix(color, background_color, 1.0 - transmittance);
+    // }
 
-    if (hit) {
-        var n = normal(p);
-        var light = normalize(vec3f(-1.0, 0.2, 0.8));
-        var view = -ray_direction;
-        color = shade(color, p, light, view, n);
-        var ambient_occlusion = calcAO(p, n);
-        color *= ambient_occlusion;
-    } else {
-        transmittance = 0.0;
-    }
+    color += 0.1 * vec3f(1.0, 0.8, 0.6) * clamp(0.2 / (min_player_distance + 0.3), 0.0, 0.3);
 
-    var depth = clamp(0.0, 1.0, exp(p.y * 0.5));
-    transmittance = clamp(0.0, 1.0, transmittance);
-    color = mix(color, vec3f(0.1, 0.2, 0.1), 1.0 - transmittance);
-    color = mix(color, srgb_to_rgb_color(vec3f(0.2, 0.1, 0.0)), 1.0 - depth);
     //color = vec3(f32(i) / 10);
     return vec4f(color, 1.0);
 }

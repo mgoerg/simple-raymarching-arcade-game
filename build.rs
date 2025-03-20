@@ -207,7 +207,7 @@ fn _preprocess_shader_file(path: &Path, simple_defines: &mut HashMap<String, Str
                 .expect("Expected name after //!undef");
             simple_defines.remove(name);
         } else {
-            println!("cargo::warning=Appending {:?}", line);
+            // println!("cargo::warning=Appending {:?}", line);
             // Expand any defines in this line
             let mut expanded_line = line.to_string();
             for (name, value) in simple_defines.iter() {

@@ -122,11 +122,11 @@ fn ellipsoidSdf(p: vec3f, r: vec3f) -> f32 {
     return k0 * (k0 - 1.0) / k1;
 }
 
-fn obstacleShapeSdf(p: vec3f, q: vec3f) -> f32 {
-    var radius = length(q.xz);
-    var thickness = 0.25;
-    return max(hollowSphereSdf(p, radius + thickness * 0.5, thickness), sphereSdf(p - vec3f(q.x, 0.0, q.z), 1.5));
-}
+// fn obstacleShapeSdf(p: vec3f, q: vec3f) -> f32 {
+//     var radius = length(q.xz);
+//     var thickness = 0.25;
+//     return max(hollowSphereSdf(p, radius + thickness * 0.5, thickness), sphereSdf(p - vec3f(q.x, 0.0, q.z), 1.5));
+// }
 
 fn vesicaSdf(p: vec3f, a: vec3f, b: vec3f, _w: f32) -> f32 {
     var c = (a + b) * 0.5;
@@ -202,11 +202,11 @@ fn obstacleSdfPlanes(p: vec3f, i: i32) -> f32 {
     // var p_2d_rotated = o.rotation * vec2f(p.x, p.z);
     var dist_2d = trapezoidSdf(p2, r1, r2, height * 0.5);
 
-    var OBSTACLE_HEIGHT = 2.5;
+    var OBSTACLE_HEIGHT = 0.5;
 
     var dist_2d2 = length(p.xz - vec2f(1.0, 0.0)) - 0.5;
 
-    return extrudeSdf(p.y, dist_2d, OBSTACLE_HEIGHT);
+    return extrudeSdf(p.y - 1.5, dist_2d, OBSTACLE_HEIGHT);
 }
 
 // fn obstacleSdf(p: vec3f, i: i32) -> f32 {
@@ -225,14 +225,12 @@ fn obstacleSdfPlanes(p: vec3f, i: i32) -> f32 {
     
 // }
 
-fn obstacle_distance(p: vec3f, rd: vec3f, i: i32) -> f32 {
+fn obstacle_distance_dir(p: vec3f, rd: vec3f, i: i32) -> f32 {
     return obstacleSdfPlanes(p, i);
-    // var o = g_obstacles[i];
-    // var d = sphereExactIntersection(p - o.center.xyz, rd, 1.5);
-    // if (d < 0.0) {
-    //     return 1000.0;
-    // }
-    // return d;
+}
+
+fn obstacle_distance(p: vec3f, i: i32) -> f32 {
+    return obstacleSdfPlanes(p, i);
 }
 
 fn player_distance(p: vec3f) -> f32 {
@@ -240,16 +238,22 @@ fn player_distance(p: vec3f) -> f32 {
     var width = g_game.player_width;
     var tangent = g_game.player_tangent.xyz;
 
-    return vesicaSdf(p, position + tangent * width, position - tangent * width, width);
+    return vesicaSdf(p, position + tangent * width, position - tangent * width, width + 0.2);
 }
 
-fn ground_distance(p: vec3f) -> f32 {
+struct GroundDistanceMapRval {
+    d: f32,
+    hex_center: vec3f,
+}
+
+fn ground_distance(p: vec3f) -> GroundDistanceMapRval {
+    var rval = GroundDistanceMapRval();
+    rval.d = 1e20;
     // Hex grid. First obtain center points by transforming to normal 2d grid. Then use sdf for hexagon prisms wrt center points.
     // forwards transform:
     // (x, y) -> x * (1, 0) + y * (0.5, 0.8660254) = (x, x * 0.5 + y * 0.8660254)
     // backwards transform:
     // (x, y) -> (x, (y - 0.5 * x) / 0.8660254)
-    var d = 1e20;
     var l = sqrt3inv * 2.0;
     var l2 = 0.5;
     var p_transformed = vec2f(p.x, (p.z - l2 * p.x) / l);
@@ -257,30 +261,42 @@ fn ground_distance(p: vec3f) -> f32 {
     for (var x = -1.0; x <= 2.0; x = x + 1.0) {
         for (var y = -1.0; y <= 2.0; y = y + 1.0) {
             var center_xy = vec2f(center_transformed.x + x, center_transformed.y + y);
-            var center_original_space = vec3f(center_xy.x, hash12(center_xy), center_xy.y * l + l2 * center_xy.x);
+            // var hash2d = textureSample(t_noise2d, s_noise2d, center_xy).r;
+            // var hash2d = -1.0;
+            var hash2d = hash12(center_xy);
+            let height_offset = hash2d;
+            var center_original_space = vec3f(center_xy.x, height_offset, center_xy.y * l + l2 * center_xy.x);
             var l3 = length(center_original_space.xz);
-            center_original_space -= UP *  40.0 / (l3 * l3 * l3);
+            center_original_space += UP * clamp(10.0 / (l3 * l3 * l3 * l3) - 1.0, 0.0, 2.1);
 
             var p_centered = (p - center_original_space + UP * 5.0);
             //d = min(d, sphereSdf(p_centered, 0.8));
             //if (length(center_original_space.xz) > 3.7) {
-            if (length(center_original_space.xz) > 2.5) {
-                d = min(d, hexPrismSdf(p_centered, vec2f(0.577, 5.0)));
+            // if (length(center_original_space.xz) > 2.5) {
+            var current_d = hexPrismSdf(p_centered, vec2f(0.577, 5.0));
+            if rval.d > current_d {
+                rval.d = current_d;
+                rval.hex_center = center_original_space;
             }
+            // }
         }
     }
-    if (d < 10.0) {
-        d = min(d, 2.0);
+    // This removes some artifacts
+    if (rval.d < 10.0) {
+        rval.d = min(rval.d, 2.0);
     }
-    return d;
+    return rval;
 }
 
-fn ground_distance_dir(p: vec3f, ray_direction: vec3f) -> f32 {
+fn ground_distance_dir(p: vec3f, ray_direction: vec3f) -> GroundDistanceMapRval {
     var up = vec3f(0.0, 1.0, 0.0);
     var h = 4.0;
     var plane_dist = plane_ray_dist(p, ray_direction, up * h, up);
     if (plane_dist > 0.5) {
-        return plane_dist - 0.25;
+        var rval = GroundDistanceMapRval();
+        rval.d = plane_dist - 0.25;
+        rval.hex_center = vec3f(0.0);
+        return rval;
     }
     return ground_distance(p);
 }
@@ -289,29 +305,57 @@ fn map_dir(p: vec3f, ray_direction: vec3f) -> f32 {
     var d = 1e20;
 
     for (var i = 0; i < g_obstacle_globals.count; i = i + 1) {
-        d = min(d, obstacle_distance(p, ray_direction, i));
-        if (d < 0.1) {
+        d = min(d, obstacle_distance_dir(p, ray_direction, i));
+        if (d < 0.01) {
             return d;
         }
     }
 
-    //d = min(d, plane_ray_dist(p, ray_direction, up, up));
-    d = min(d, ground_distance_dir(p, ray_direction));
+    d = min(d, ground_distance_dir(p, ray_direction).d);
     d = min(d, player_distance(p));
     return d;
 }
 
 
-fn map(p_: vec3f) -> f32 {
-    var p = p_;
+fn map(p: vec3f) -> f32 {
     var d = 1e20;
-    //d = min(d, dot(p, vec3(0.0, 1.0, 0.0)) - 1.0);
     
-    d = min(d, ground_distance(p));
+    d = min(d, ground_distance(p).d);
     d = min(d, player_distance(p));
 
     for (var i = 0; i < g_obstacle_globals.count; i = i + 1) {
-        d = min(d, obstacleSdfPlanes(p, i));
+        d = min(d, obstacle_distance(p, i));
     }
     return d;
+}
+
+
+
+fn map_color(p: vec3f) -> i32 {
+    var d = 1e20;
+    var rval = -1;
+    var gnd_dist_rval = ground_distance(p);
+    if d > gnd_dist_rval.d {
+        d = gnd_dist_rval.d;
+        if (length(gnd_dist_rval.hex_center.xz) < 1.5) {
+            rval = 2;
+        } else {
+            rval = 0;
+        }
+    }
+    var player_dist = player_distance(p);
+    if d > player_dist {
+        d = player_dist;
+        rval = 1;
+    }
+
+    for (var i = 0; i < g_obstacle_globals.count; i = i + 1) {
+        var od = obstacle_distance(p, i);
+        if d > od {
+            d = od;
+            rval = 2;
+        }
+    }
+
+    return rval;
 }

@@ -1,4 +1,5 @@
-use cgmath::{EuclideanSpace, InnerSpace, Vector3, VectorSpace};
+
+use cgmath::{EuclideanSpace, InnerSpace, Vector3};
 use wgpu::util::DeviceExt;
 use winit::dpi::PhysicalSize;
 use winit::window::Window;
@@ -8,8 +9,8 @@ use crate::game::{self, Game};
 use crate::input::{InputHandler, InputGetInterface};
 use crate::time::get_time_since_start;
 
-const MAX_WIDTH_WEB: u32 = 960;
-const MAX_HEIGHT_WEB: u32 = 540;
+const MAX_WIDTH_WEB: u32 = 480;
+const MAX_HEIGHT_WEB: u32 = 270;
 
 // pub trait UniformBlock: bytemuck::Pod + bytemuck::Zeroable + 'static {
 //     /// A textual label used for debugging/logging
@@ -81,7 +82,7 @@ impl CameraUniforms {
 
 #[repr(C)]
 #[derive(Debug, Copy, Clone, bytemuck::Pod, bytemuck::Zeroable)]
-struct GameUniforms {
+pub struct GameUniforms {
     player_angle: f32,
     player_width: f32,
     _padding: [f32; 2],
@@ -146,6 +147,8 @@ pub struct Renderer<'a> {
 
     // All GPU-based uniform data
     pub uniforms: Uniforms,
+
+    pub noise_texture_bind_group: wgpu::BindGroup,
 
     // Keep track of the current size so we can handle resizes
     pub size: PhysicalSize<u32>,
@@ -227,12 +230,109 @@ impl<'a> Renderer<'a> {
         // Create uniform buffers
         let uniforms = Self::setup_uniform_buffers(&device, size);
 
+        // Create Texture
+        let tex_width = 1024;
+        let tex_height = 1024;
+
+        let format = wgpu::TextureFormat::R32Float;
+        let mut texture_data = vec![0.0; tex_width as usize * tex_height as usize];
+        for y in 0..tex_height {
+            for x in 0..tex_width {
+                let i = y * tex_width + x;
+                let p3 = cgmath::Vector3::new(x as f32, y as f32, x as f32) * 0.1031;
+                let mut p3 = cgmath::Vector3::new(p3.x.fract(), p3.y.fract(), p3.z.fract());
+                let u = cgmath::Vector3::new(p3.y + 33.33, p3.z + 33.33, p3.x + 33.33);
+                let v = cgmath::dot(p3, u);
+                p3 += cgmath::Vector3::new(v, v, v);
+                let value = ((p3.x + p3.y) * p3.z).fract();
+                // fn hash12(p: vec2f) -> f32 {
+                //     var p3 = fract(vec3f(p.xyx) * 0.1031);
+                //     p3 += dot(p3, p3.yzx + 33.33);
+                //     return fract((p3.x + p3.y) * p3.z);
+                // }
+                
+                // let value = (x ^ y) as u16;
+                // let mut value = 0;
+                // value = (x + y) as u8;
+                // if (x as u32) & 3 == 1 && (y as u32) & 3 == 1 {
+                //     value = 100;
+                // }
+                // value = 0.0;
+                texture_data[i as usize] = 1.0/0.0;
+            }
+        }
+        let texture_size = wgpu::Extent3d {
+            width: tex_width,
+            height: tex_height,
+            depth_or_array_layers: 1,
+        };
+
+        let texture = device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("Noise Texture"),
+            size: texture_size,
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: format,
+            usage: wgpu::TextureUsages::COPY_DST | wgpu::TextureUsages::TEXTURE_BINDING,
+            view_formats: &[format],
+        });
+        queue.write_texture(
+            wgpu::ImageCopyTexture {
+                texture: &texture,
+                mip_level: 0,
+                origin: wgpu::Origin3d::ZERO,
+                aspect: wgpu::TextureAspect::All,
+            },
+            bytemuck::cast_slice(texture_data.as_slice()), 
+            wgpu::ImageDataLayout {offset: 0, bytes_per_row: Some(tex_width * 4), rows_per_image: None}, 
+            texture_size
+        );
+        let texture_view = texture.create_view(&wgpu::TextureViewDescriptor::default());
+        let texture_sampler = device.create_sampler(&wgpu::SamplerDescriptor {
+            address_mode_u: wgpu::AddressMode::Repeat,
+            address_mode_v: wgpu::AddressMode::Repeat,
+            address_mode_w: wgpu::AddressMode::Repeat,
+            mag_filter: wgpu::FilterMode::Nearest,
+            min_filter: wgpu::FilterMode::Nearest,
+            mipmap_filter: wgpu::FilterMode::Nearest,
+            ..Default::default()
+        });
+        let noise_texture_bind_group_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor{
+            label: Some("Noise Texture Bind Group Layout"),
+            entries: &[wgpu::BindGroupLayoutEntry {
+                binding: 0,
+                visibility: wgpu::ShaderStages::FRAGMENT,
+                ty: wgpu::BindingType::Texture {
+                    sample_type: wgpu::TextureSampleType::Float {filterable: false},
+                    view_dimension: wgpu::TextureViewDimension::D2,
+                    multisampled: false,
+                },
+                count: None,
+            }, wgpu::BindGroupLayoutEntry {
+                binding: 1,
+                visibility: wgpu::ShaderStages::FRAGMENT,
+                ty: wgpu::BindingType::Sampler (wgpu::SamplerBindingType::NonFiltering),
+                count: None,
+            }],
+        });
+        let noise_texture_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            layout: &noise_texture_bind_group_layout,
+            entries: &[wgpu::BindGroupEntry {
+                binding: 0,
+                resource: wgpu::BindingResource::TextureView(&texture_view),
+            }, wgpu::BindGroupEntry {
+                binding: 1,
+                resource: wgpu::BindingResource::Sampler(&texture_sampler),
+            }],
+            label: Some("Noise Texture Bind Group"),
+        });
+
         // Create render pipeline
         let render_pipeline = Self::create_render_pipeline(
             &device,
             &config,
-            &uniforms.engine_group_layout,
-            &uniforms.obstacle_bind_group_layout,
+            &[&uniforms.engine_group_layout, &uniforms.obstacle_bind_group_layout, &noise_texture_bind_group_layout],
         )
         .await;
 
@@ -241,6 +341,7 @@ impl<'a> Renderer<'a> {
             device,
             queue,
             config,
+            noise_texture_bind_group: noise_texture_bind_group,
             render_frame: 0,
             render_pipeline,
             uniforms,
@@ -253,8 +354,7 @@ impl<'a> Renderer<'a> {
     async fn create_render_pipeline(
         device: &wgpu::Device,
         config: &wgpu::SurfaceConfiguration,
-        engine_group_layout: &wgpu::BindGroupLayout,
-        obstacle_bind_group_layout: &wgpu::BindGroupLayout,
+        bind_group_layouts: &[&wgpu::BindGroupLayout],
     ) -> wgpu::RenderPipeline {
         // Load WGSL code. On native, we can read from a file; on WASM, we embed it.
         let shader_code = if cfg!(target_arch = "wasm32") {
@@ -279,7 +379,7 @@ impl<'a> Renderer<'a> {
         let render_pipeline_layout =
             device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
                 label: Some("Render Pipeline Layout"),
-                bind_group_layouts: &[engine_group_layout, obstacle_bind_group_layout],
+                bind_group_layouts: bind_group_layouts,
                 push_constant_ranges: &[],
             });
 
@@ -612,6 +712,7 @@ impl<'a> Renderer<'a> {
             render_pass.set_pipeline(&self.render_pipeline);
             render_pass.set_bind_group(0, &self.uniforms.engine_bind_group, &[]);
             render_pass.set_bind_group(1, &self.uniforms.obstacle_bind_group, &[]);
+            render_pass.set_bind_group(2, &self.noise_texture_bind_group, &[]);
             render_pass.draw(0..6, 0..1);
         }
 

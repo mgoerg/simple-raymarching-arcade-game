@@ -19,11 +19,16 @@ use crate::{
 
 
 
-pub struct Engine<'a> {
-    pub window: &'a Window,
+pub struct EngineContext<'window> {
+    pub input: &'window InputHandler<'window>,
+    pub renderer: &'window Renderer<'window>,
+}
+
+pub struct Engine<'window> {
+    pub window: &'window Window,
     pub game: Game,
-    pub input: InputHandler<'a>,
-    pub renderer: Renderer<'a>,
+    pub input: InputHandler<'window>,
+    pub renderer: Renderer<'window>,
 
     // We keep track of frames/time
     pub last_time_stamp: f64,
@@ -35,8 +40,8 @@ pub struct Engine<'a> {
     pub wait_until: f64,
 }
 
-impl<'a> Engine<'a> {
-    pub async fn new(window: &'a Window) -> Engine<'a> {
+impl<'window> Engine<'window> {
+    pub async fn new(window: &'window Window) -> Engine<'window> {
         // Create our Renderer
         let size = window.inner_size();
         let renderer = Renderer::new(window, size).await;
@@ -49,11 +54,17 @@ impl<'a> Engine<'a> {
         let mut input = InputHandler::new(window);
         input.activate();
 
+        let context = EngineContext {
+            input: &input,
+            renderer: &renderer,
+        };
+
         Engine {
             window,
             renderer,
             input,
             game,
+            // context,
             last_time_stamp: now,
             frame_duration: 1.0 / 60.0,
             time_accumulator: 0.0,
@@ -72,9 +83,12 @@ impl<'a> Engine<'a> {
     /// Update logic (no rendering) each discrete timestep
     pub fn update(&mut self, dt: f32) {
         self.input.update(dt);
-        self.game.update(dt, &self.input);
-
-        // For example, game logic updates, collision checks, etc.
+        let engine_context = EngineContext {
+            input: &mut self.input,
+            renderer: &mut self.renderer,
+        };
+        self.game.update(dt, &engine_context);
+        // self.game.update(dt, &self.input);
     }
 
     /// then let the `Renderer` do the actual GPU updates + rendering.
@@ -153,7 +167,7 @@ impl<'a> Engine<'a> {
 
                 self.time_accumulator += dt;
                 let mut updates_count = 0;
-                while self.time_accumulator >= self.frame_duration && updates_count < 10 {
+                while self.time_accumulator >= self.frame_duration && updates_count < 1 {
                     self.time_accumulator -= self.frame_duration;
                     self.update(dt as f32);
                     self.fps_counter.on_update();
